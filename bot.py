@@ -88,7 +88,8 @@ async def connect(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except Exception as e:
         logging.error(f"Device flow start error: {e}")
         await update.message.reply_text(
-            f"❌ Auth error: <code>{e}</code>",
+            "❌ Could not start the authorisation flow. "
+            "Please check that <code>credentials.json</code> is present and try again.",
             parse_mode="HTML",
         )
         return
@@ -101,8 +102,8 @@ async def connect(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     await update.message.reply_text(
         f"🔐 <b>Connect Google Calendar</b>\n\n"
-        f"1️⃣  Open this URL in any browser:\n"
-        f"<code>{verification_url}</code>\n\n"
+        f"1️⃣  Tap this link to open Google's authorisation page:\n"
+        f'<a href="{verification_url}">{verification_url}</a>\n\n'
         f"2️⃣  Enter this code when prompted:\n"
         f"<b><code>{user_code}</code></b>\n\n"
         f"⏱️ This code expires in {expires_in // 60} minutes.\n\n"
