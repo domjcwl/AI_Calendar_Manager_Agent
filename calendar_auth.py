@@ -16,22 +16,32 @@ SCOPES = [
 # Tasks API accepts the same OAuth token granted for Calendar. We request
 # only the calendar scope during device flow and reuse the token for tasks.
 
-TOKEN_PATH = "token.pickle"
-CREDENTIALS_PATH = "credentials.json"
+TOKENS_DIR        = "tokens"
+CREDENTIALS_PATH  = "credentials.json"
 
 
-def get_credentials() -> Credentials:
-    """Load and refresh credentials from disk. Raises RuntimeError('not_authorised') if not yet authorised."""
-    if not os.path.exists(TOKEN_PATH):
+def _token_path(user_id: int) -> str:
+    """Return the token file path for a given Telegram user_id."""
+    os.makedirs(TOKENS_DIR, exist_ok=True)
+    return os.path.join(TOKENS_DIR, f"token_{user_id}.pickle")
+
+
+def get_credentials(user_id: int) -> Credentials:
+    """
+    Load and refresh credentials for *user_id*.
+    Raises RuntimeError('not_authorised') if not yet authorised.
+    """
+    path = _token_path(user_id)
+    if not os.path.exists(path):
         raise RuntimeError("not_authorised")
 
-    with open(TOKEN_PATH, "rb") as f:
+    with open(path, "rb") as f:
         creds: Credentials = pickle.load(f)
 
     if not creds or not creds.valid:
         if creds and creds.expired and creds.refresh_token:
             creds.refresh(Request())
-            with open(TOKEN_PATH, "wb") as f:
+            with open(path, "wb") as f:
                 pickle.dump(creds, f)
         else:
             raise RuntimeError("not_authorised")
@@ -39,16 +49,16 @@ def get_credentials() -> Credentials:
     return creds
 
 
-def get_calendar_service():
-    """Return an authorised Google Calendar service. Raises RuntimeError('not_authorised') if not connected."""
-    creds = get_credentials()
+def get_calendar_service(user_id: int):
+    """Return an authorised Google Calendar service for *user_id*."""
+    creds = get_credentials(user_id)
     return build("calendar", "v3", credentials=creds)
 
 
-def is_authorised() -> bool:
-    """Quick check — can we load valid credentials right now?"""
+def is_authorised(user_id: int) -> bool:
+    """Return True if *user_id* has valid stored credentials."""
     try:
-        get_credentials()
+        get_credentials(user_id)
         return True
     except Exception:
         return False
@@ -61,9 +71,7 @@ def is_authorised() -> bool:
 def start_device_flow() -> dict:
     """
     Begin Google's Device Authorization Flow.
-
-    Returns a dict with:
-        device_code, user_code, verification_url, expires_in, interval
+    Returns a dict with: device_code, user_code, verification_url, expires_in, interval.
     """
     import urllib.request
     import urllib.parse
@@ -71,12 +79,12 @@ def start_device_flow() -> dict:
     with open(CREDENTIALS_PATH) as f:
         client_cfg = json.load(f)
 
-    cfg = client_cfg.get("installed") or client_cfg.get("web")
+    cfg       = client_cfg.get("installed") or client_cfg.get("web")
     client_id = cfg["client_id"]
 
     data = urllib.parse.urlencode({
         "client_id": client_id,
-        "scope": " ".join(SCOPES),
+        "scope":     " ".join(SCOPES),
     }).encode()
 
     req = urllib.request.Request(
@@ -88,10 +96,15 @@ def start_device_flow() -> dict:
         return json.loads(resp.read())
 
 
-async def poll_device_flow(device_code: str, interval: int, expires_in: int) -> Credentials | None:
+async def poll_device_flow(
+    user_id: int,
+    device_code: str,
+    interval: int,
+    expires_in: int,
+) -> Credentials | None:
     """
-    Poll Google's token endpoint until the user approves or the code expires.
-
+    Poll Google's token endpoint until *user_id* approves or the code expires.
+    Saves the token to tokens/token_{user_id}.pickle on success.
     Returns Credentials on success, None on expiry / denial.
     """
     import urllib.request
@@ -134,11 +147,10 @@ async def poll_device_flow(device_code: str, interval: int, expires_in: int) -> 
                 interval += 5
                 continue
             else:
-                # access_denied, expired_token, etc.
                 return None
 
         expiry = datetime.datetime.utcnow() + datetime.timedelta(seconds=token_data["expires_in"])
-        creds = Credentials(
+        creds  = Credentials(
             token=token_data["access_token"],
             refresh_token=token_data.get("refresh_token"),
             token_uri="https://oauth2.googleapis.com/token",
@@ -147,7 +159,8 @@ async def poll_device_flow(device_code: str, interval: int, expires_in: int) -> 
             scopes=SCOPES,
             expiry=expiry,
         )
-        with open(TOKEN_PATH, "wb") as f:
+        path = _token_path(user_id)
+        with open(path, "wb") as f:
             pickle.dump(creds, f)
 
         return creds

@@ -1,26 +1,32 @@
 import datetime
+from contextvars import ContextVar
+
 from calendar_auth import get_calendar_service, get_credentials
 from googleapiclient.discovery import build
 from langchain_core.tools import tool
+
+# ---------------------------------------------------------------------------
+# Per-request user identity
+# Set by agent_node in agent.py before invoking the model each turn.
+# Every tool reads this to know whose calendar/tasks to operate on.
+# ---------------------------------------------------------------------------
+
+current_user_id: ContextVar[int] = ContextVar("current_user_id")
 
 
 # ---------------------------------------------------------------------------
 # Internal helpers
 # ---------------------------------------------------------------------------
 
-def _get_tasks_service():
-    """Build a Google Tasks API service using the same credentials."""
-    creds = get_credentials()
+def _svc():
+    """Authorised Google Calendar service for the current user."""
+    return get_calendar_service(current_user_id.get())
+
+
+def _tasks_svc():
+    """Authorised Google Tasks service for the current user."""
+    creds = get_credentials(current_user_id.get())
     return build("tasks", "v1", credentials=creds)
-
-
-def _find_calendar_id(service, keyword: str) -> str | None:
-    """Return the calendarId whose summary contains *keyword* (case-insensitive)."""
-    calendars = service.calendarList().list().execute().get("items", [])
-    for cal in calendars:
-        if keyword.lower() in cal.get("summary", "").lower():
-            return cal["id"]
-    return None
 
 
 def _fmt_event(e: dict) -> str:
@@ -58,11 +64,11 @@ def list_events(days_ahead: int = 7) -> str:
     Returns a formatted list of upcoming events.
     """
     try:
-        service = get_calendar_service()
+        service = _svc()
         now    = datetime.datetime.utcnow().isoformat() + "Z"
         future = (datetime.datetime.utcnow() + datetime.timedelta(days=days_ahead)).isoformat() + "Z"
 
-        events_result = service.events().list(
+        result = service.events().list(
             calendarId="primary",
             timeMin=now,
             timeMax=future,
@@ -71,7 +77,7 @@ def list_events(days_ahead: int = 7) -> str:
             orderBy="startTime",
         ).execute()
 
-        events = events_result.get("items", [])
+        events = result.get("items", [])
         if not events:
             return f"No upcoming events in the next {days_ahead} days."
 
@@ -109,7 +115,7 @@ def create_event(
     Returns a confirmation with the event link.
     """
     try:
-        service = get_calendar_service()
+        service = _svc()
         event = {
             "summary":     summary,
             "location":    location,
@@ -144,7 +150,7 @@ def update_event(
         location:       New location (optional).
     """
     try:
-        service = get_calendar_service()
+        service = _svc()
         event   = service.events().get(calendarId="primary", eventId=event_id).execute()
 
         if summary:
@@ -175,7 +181,7 @@ def delete_event(event_id: str) -> str:
         event_id: The event ID to delete.
     """
     try:
-        service = get_calendar_service()
+        service = _svc()
         service.events().delete(calendarId="primary", eventId=event_id).execute()
         return f"✅ Event {event_id} deleted successfully."
     except Exception as ex:
@@ -192,11 +198,11 @@ def search_events(query: str, days_ahead: int = 30) -> str:
     Returns matching events.
     """
     try:
-        service = get_calendar_service()
+        service = _svc()
         now    = datetime.datetime.utcnow().isoformat() + "Z"
         future = (datetime.datetime.utcnow() + datetime.timedelta(days=days_ahead)).isoformat() + "Z"
 
-        events_result = service.events().list(
+        result = service.events().list(
             calendarId="primary",
             timeMin=now,
             timeMax=future,
@@ -206,7 +212,7 @@ def search_events(query: str, days_ahead: int = 30) -> str:
             maxResults=20,
         ).execute()
 
-        events = events_result.get("items", [])
+        events = result.get("items", [])
         if not events:
             return f"No events found matching '{query}'."
 
@@ -226,11 +232,7 @@ BIRTHDAY_TAG = "#birthday"
 
 
 @tool
-def add_birthday(
-    name: str,
-    birth_date: str,
-    note: str = "",
-) -> str:
+def add_birthday(name: str, birth_date: str, note: str = "") -> str:
     """
     Add a yearly recurring birthday event to the primary calendar.
     Args:
@@ -240,7 +242,7 @@ def add_birthday(
     Returns confirmation with event link.
     """
     try:
-        service = get_calendar_service()
+        service = _svc()
         event = {
             "summary":     f"🎂 {name}'s Birthday",
             "description": f"{BIRTHDAY_TAG}\n{note}".strip(),
@@ -273,7 +275,7 @@ def list_birthdays(days_ahead: int = 365) -> str:
     Returns a formatted list of upcoming birthdays.
     """
     try:
-        service = get_calendar_service()
+        service = _svc()
         now    = datetime.datetime.utcnow().isoformat() + "Z"
         future = (datetime.datetime.utcnow() + datetime.timedelta(days=days_ahead)).isoformat() + "Z"
 
@@ -310,7 +312,7 @@ def search_birthday(name: str) -> str:
     Returns matching birthday events.
     """
     try:
-        service = get_calendar_service()
+        service = _svc()
         now    = datetime.datetime.utcnow().isoformat() + "Z"
         future = (datetime.datetime.utcnow() + datetime.timedelta(days=730)).isoformat() + "Z"
 
@@ -358,7 +360,7 @@ def update_birthday(
     Returns confirmation with updated event link.
     """
     try:
-        service = get_calendar_service()
+        service = _svc()
         event   = service.events().get(calendarId="primary", eventId=event_id).execute()
 
         if name:
@@ -390,7 +392,7 @@ def delete_birthday(event_id: str) -> str:
     Returns confirmation message.
     """
     try:
-        service = get_calendar_service()
+        service = _svc()
         service.events().delete(calendarId="primary", eventId=event_id).execute()
         return f"✅ Birthday event {event_id} deleted."
     except Exception as ex:
@@ -418,7 +420,7 @@ def add_task(
     Returns confirmation with task details.
     """
     try:
-        tasks_svc = _get_tasks_service()
+        tasks_svc = _tasks_svc()
         list_id   = _resolve_task_list(tasks_svc, task_list)
 
         task_body: dict = {"title": title, "notes": notes}
@@ -445,7 +447,7 @@ def list_tasks(
     Returns a formatted list of tasks.
     """
     try:
-        tasks_svc = _get_tasks_service()
+        tasks_svc = _tasks_svc()
         list_id   = _resolve_task_list(tasks_svc, task_list)
 
         result = tasks_svc.tasks().list(
@@ -471,10 +473,7 @@ def list_tasks(
 
 
 @tool
-def search_tasks(
-    query: str,
-    task_list: str = "@default",
-) -> str:
+def search_tasks(query: str, task_list: str = "@default") -> str:
     """
     Search for tasks by keyword in their title or notes.
     Args:
@@ -483,7 +482,7 @@ def search_tasks(
     Returns matching tasks.
     """
     try:
-        tasks_svc = _get_tasks_service()
+        tasks_svc = _tasks_svc()
         list_id   = _resolve_task_list(tasks_svc, task_list)
 
         result = tasks_svc.tasks().list(
@@ -534,7 +533,7 @@ def update_task(
     Returns confirmation message.
     """
     try:
-        tasks_svc = _get_tasks_service()
+        tasks_svc = _tasks_svc()
         list_id   = _resolve_task_list(tasks_svc, task_list)
         task      = tasks_svc.tasks().get(tasklist=list_id, task=task_id).execute()
 
@@ -556,10 +555,7 @@ def update_task(
 
 
 @tool
-def delete_task(
-    task_id: str,
-    task_list: str = "@default",
-) -> str:
+def delete_task(task_id: str, task_list: str = "@default") -> str:
     """
     Delete a task by its ID.
     Use list_tasks or search_tasks to find the task ID first.
@@ -569,7 +565,7 @@ def delete_task(
     Returns confirmation message.
     """
     try:
-        tasks_svc = _get_tasks_service()
+        tasks_svc = _tasks_svc()
         list_id   = _resolve_task_list(tasks_svc, task_list)
         tasks_svc.tasks().delete(tasklist=list_id, task=task_id).execute()
         return f"✅ Task {task_id} deleted."
@@ -584,7 +580,7 @@ def list_task_lists() -> str:
     Returns all task list names and IDs.
     """
     try:
-        tasks_svc = _get_tasks_service()
+        tasks_svc = _tasks_svc()
         result    = tasks_svc.tasklists().list(maxResults=20).execute()
         lists     = result.get("items", [])
         if not lists:

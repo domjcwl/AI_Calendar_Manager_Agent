@@ -1,18 +1,18 @@
 import datetime
 import httpx
 import os
-from typing import Annotated, Sequence, TypedDict, Optional
+from typing import Annotated, Sequence, TypedDict
 
 from dotenv import load_dotenv
-from langchain_core.messages import BaseMessage, HumanMessage, AIMessage, ToolMessage, SystemMessage
+from langchain_core.messages import BaseMessage, HumanMessage, AIMessage, SystemMessage
 from langchain_openai import ChatOpenAI
-from langchain_core.tools import tool
 from langgraph.graph.message import add_messages
 from langgraph.graph import StateGraph, END
 from langgraph.prebuilt import ToolNode
 
 from calendar_auth import is_authorised
 from tools import (
+    current_user_id,
     add_birthday, list_birthdays, search_birthday, update_birthday, delete_birthday,
     add_task, list_task_lists, search_tasks, update_task, delete_task, list_tasks,
     list_events, create_event, update_event, delete_event, search_events,
@@ -84,10 +84,9 @@ Formatting rules (IMPORTANT):
 # ---------------------------------------------------------------------------
 
 class AgentState(TypedDict):
-    messages: Annotated[Sequence[BaseMessage], add_messages]
-    # Set to True by the oauth node when credentials are confirmed valid.
-    # Set to False (or left absent) when the user has not yet connected.
-    oauth_ok: bool
+    messages:  Annotated[Sequence[BaseMessage], add_messages]
+    oauth_ok:  bool
+    user_id:   int   # Telegram user ID — threaded through every turn
 
 
 # ---------------------------------------------------------------------------
@@ -96,16 +95,21 @@ class AgentState(TypedDict):
 
 def oauth_node(state: AgentState) -> AgentState:
     """
-    Check whether valid Google credentials exist.
+    Check whether valid Google credentials exist for this user.
     Sets oauth_ok=True if authorised, False otherwise.
-    Does NOT modify messages — routing only.
     """
-    return {"oauth_ok": is_authorised(), "messages": []}
+    return {
+        "oauth_ok": is_authorised(state["user_id"]),
+        "messages": [],
+    }
 
 
 def agent_node(state: AgentState) -> AgentState:
+    # Make the user's identity available to tools via context var
+    current_user_id.set(state["user_id"])
+
     system_msg = SystemMessage(content=get_system_prompt())
-    response = model.invoke([system_msg] + list(state["messages"]))
+    response   = model.invoke([system_msg] + list(state["messages"]))
     return {"messages": [response]}
 
 
@@ -114,10 +118,7 @@ def agent_node(state: AgentState) -> AgentState:
 # ---------------------------------------------------------------------------
 
 def route_after_oauth(state: AgentState) -> str:
-    """Conditional edge out of oauth_node."""
-    if state.get("oauth_ok"):
-        return "agent"
-    return "not_connected"
+    return "agent" if state.get("oauth_ok") else "not_connected"
 
 
 def should_continue(state: AgentState) -> str:
@@ -132,21 +133,18 @@ def should_continue(state: AgentState) -> str:
 # ---------------------------------------------------------------------------
 
 tool_node = ToolNode(tools)
-workflow = StateGraph(AgentState)
+workflow  = StateGraph(AgentState)
 
-workflow.add_node("oauth",  oauth_node)
-workflow.add_node("agent",  agent_node)
-workflow.add_node("tools",  tool_node)
+workflow.add_node("oauth", oauth_node)
+workflow.add_node("agent", agent_node)
+workflow.add_node("tools", tool_node)
 
 workflow.set_entry_point("oauth")
 
 workflow.add_conditional_edges(
     "oauth",
     route_after_oauth,
-    {
-        "agent":         "agent",
-        "not_connected": END,        # bot.py handles the messaging
-    },
+    {"agent": "agent", "not_connected": END},
 )
 
 workflow.add_conditional_edges(
@@ -164,19 +162,27 @@ graph = workflow.compile()
 # Public API
 # ---------------------------------------------------------------------------
 
-async def run_agent(user_message: str, history: list) -> tuple[str, list, bool]:
+async def run_agent(
+    user_id: int,
+    user_message: str,
+    history: list,
+) -> tuple[str, list, bool]:
     """
-    Run one turn of the agent.
+    Run one turn of the agent for a specific Telegram user.
 
     Returns:
         (reply_text, updated_history, oauth_ok)
-        reply_text  – empty string when oauth_ok is False (bot.py handles the prompt)
-        oauth_ok    – False means the user has not connected Google Calendar yet
+        reply_text – empty string when oauth_ok is False
+        oauth_ok   – False means the user has not connected Google Calendar yet
     """
-    new_message = HumanMessage(content=user_message)
+    # Set context var immediately so any synchronous pre-graph code is covered too
+    current_user_id.set(user_id)
+
+    new_message  = HumanMessage(content=user_message)
     input_state: AgentState = {
         "messages": history + [new_message],
         "oauth_ok": False,
+        "user_id":  user_id,
     }
 
     result = await graph.ainvoke(input_state)

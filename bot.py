@@ -68,10 +68,12 @@ async def clear(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def connect(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """
-    Start the Device Authorization Flow so the user can authorise from any browser.
+    Start the Device Authorization Flow for this specific user.
     No local server or redirect URL is required.
     """
-    if is_authorised():
+    user_id = update.effective_user.id
+
+    if is_authorised(user_id):
         await update.message.reply_text(
             "✅ Your Google Calendar is already connected! Just send me a message.",
             parse_mode="HTML",
@@ -86,10 +88,10 @@ async def connect(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         flow = start_device_flow()
     except Exception as e:
-        logging.error(f"Device flow start error: {e}")
+        logging.error(f"Device flow start error for user {user_id}: {e}")
         await update.message.reply_text(
-            "❌ Could not start the authorisation flow. "
-            "Please check that <code>credentials.json</code> is present and try again.",
+            f"❌ Could not start the authorisation flow.\n"
+            f"<code>{e}</code>",
             parse_mode="HTML",
         )
         return
@@ -111,10 +113,11 @@ async def connect(update: Update, context: ContextTypes.DEFAULT_TYPE):
         parse_mode="HTML",
     )
 
-    # Poll in the background so the bot stays responsive
+    # Poll in the background so the bot stays responsive for all users
     asyncio.create_task(
         _wait_for_oauth(
             update=update,
+            user_id=user_id,
             device_code=device_code,
             interval=interval,
             expires_in=expires_in,
@@ -124,12 +127,13 @@ async def connect(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def _wait_for_oauth(
     update: Update,
+    user_id: int,
     device_code: str,
     interval: int,
     expires_in: int,
 ):
     """Background task: poll until approved or expired, then notify the user."""
-    creds = await poll_device_flow(device_code, interval, expires_in)
+    creds = await poll_device_flow(user_id, device_code, interval, expires_in)
 
     if creds:
         await update.message.reply_text(
@@ -173,7 +177,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     try:
         reply, updated_history, oauth_ok = await run_agent(
-            user_text, user_histories[user_id]
+            user_id, user_text, user_histories[user_id]
         )
         user_histories[user_id] = updated_history
 
