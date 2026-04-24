@@ -36,9 +36,8 @@ GREETING = (
 
 HELP_TEXT = (
     "<b>What I can do:</b>\n\n"
-    "📅 <b>Events</b> — 'What do I have this week?', 'Schedule a meeting tomorrow at 2pm'\n"
-    "🎂 <b>Birthdays</b> — 'Add Alice's birthday on July 15', 'When is John's birthday?'\n"
-    "✅ <b>Tasks</b> — 'Add a task to buy groceries', 'Show my tasks'\n\n"
+    "📅 <b>Activities</b> — 'What do I have this week?', 'Add gym tomorrow 7-8am', 'Reschedule my dentist to Friday'\n"
+    "🎂 <b>Birthdays</b> — 'Add Alice's birthday on July 15', 'When is John's birthday?'\n\n"
     "<b>Commands</b>\n"
     "/connect — Link your Google Calendar\n"
     "/clear   — Reset conversation history\n"

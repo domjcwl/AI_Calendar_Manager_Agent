@@ -12,10 +12,6 @@ SCOPES = [
     "https://www.googleapis.com/auth/calendar",
 ]
 
-# Google Tasks API does not support device flow scopes directly, but the
-# Tasks API accepts the same OAuth token granted for Calendar. We request
-# only the calendar scope during device flow and reuse the token for tasks.
-
 TOKENS_DIR        = "tokens"
 CREDENTIALS_PATH  = "credentials.json"
 

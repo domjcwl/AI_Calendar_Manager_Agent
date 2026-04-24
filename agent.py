@@ -13,18 +13,16 @@ from langgraph.prebuilt import ToolNode
 from calendar_auth import is_authorised
 from tools import (
     current_user_id,
+    add_activity, list_activities, search_activities, update_activity, delete_activity,
     add_birthday, list_birthdays, search_birthday, update_birthday, delete_birthday,
-    add_task, list_task_lists, search_tasks, update_task, delete_task, list_tasks,
-    list_events, create_event, update_event, delete_event, search_events,
 )
 
 load_dotenv()
 api_key = os.getenv("OPENAI_API_KEY")
 
 tools = [
+    add_activity, list_activities, search_activities, update_activity, delete_activity,
     add_birthday, list_birthdays, search_birthday, update_birthday, delete_birthday,
-    add_task, list_task_lists, search_tasks, update_task, delete_task, list_tasks,
-    list_events, create_event, update_event, delete_event, search_events,
 ]
 
 model = ChatOpenAI(
@@ -40,41 +38,43 @@ def get_system_prompt():
 Today's date and time is: {today}
 The user's timezone is: Asia/Singapore (UTC+8)
 
-You can:
-- list_events: View upcoming events
-- create_event: Add a new event
-- update_event: Modify an existing event by ID
-- delete_event: Remove an event by ID
-- search_events: Search for events by keyword
-- add_birthday: Add a new birthday
-- list_birthdays: view upcoming birthdays
-- search_birthday: search for a birthday by keyword
-- update_birthday: Modify an existing birthday
-- delete_birthday: Remove a birthday
-- add_task: Add a task
-- list_task_lists: Discover and view all task list names (e.g. "My Tasks", "Work")
-- search_tasks: search for task by keywords
-- update_task: Modify an existing task
-- delete_task: Remove a task
-- list_tasks: view upcoming tasks
-- Answer from your own in built knowledge
+You can help with:
+
+📅 ACTIVITIES (meetings, tasks, errands, workouts, reminders — anything on the calendar)
+- add_activity: Add a new activity. Always ask for or infer: title, date, start_time (HH:MM), end_time (HH:MM).
+                If no time is mentioned, default to 09:00–10:00 SGT.
+                Examples: "gym tomorrow 7–8am" → date=tomorrow, start_time="07:00", end_time="08:00"
+                          "dentist on Friday at 2pm" → date=Friday, start_time="14:00" (end defaults to 15:00)
+- list_activities: View upcoming activities (excludes birthdays). Default 7 days ahead.
+- search_activities: Search by keyword across all upcoming activities.
+- update_activity: Change title, date, start_time, end_time, description, or location.
+                   Preserves any unspecified fields from the existing activity.
+- delete_activity: Remove an activity by ID.
+
+🎂 BIRTHDAYS
+- add_birthday: Add a yearly recurring birthday (all-day, repeats every year).
+- list_birthdays: View upcoming birthdays.
+- search_birthday: Search for a birthday by name.
+- update_birthday: Modify a birthday.
+- delete_birthday: Remove a birthday.
 
 Guidelines:
-- Convert relative times like "tomorrow at 3pm" to ISO 8601 using today's date.
-- DO NOT include links with sensitive IDs or secrets in your replies.
-- When updating or deleting a birthday/task/event, always double confirm their intent before executing tool call.
-- Be concise and always confirm irreversible actions like deletions.
+- Everything the user wants to schedule is an "activity" — don't distinguish between tasks and events.
+- All times are in SGT (UTC+8). Convert relative expressions like "tomorrow", "next Monday", "this Friday" using today's date.
+- When a time range is given ("2–4pm", "from 10 to 11"), extract both start_time and end_time.
+- When only a single time is given ("at 3pm"), set start_time and let end_time default to +1 hour.
+- DO NOT expose raw event IDs or internal tags in replies.
+- Always confirm before deleting or making irreversible changes.
 
-Formatting rules (IMPORTANT):
-- Use HTML tags only — the output is rendered in Telegram with parse_mode HTML.
-- NEVER use ** or * or _ for formatting under any circumstances.
-- Use <b>text</b> for bold, <i>text</i> for italics. Never use * or _ for formatting.
-- When listing events, use this structure for each item:
-    📅 <b>Date</b> — <b>Event name</b>
-    🕐 Time (if applicable)
-    📝 Extra details (if any)
-- Add a relevant emoji before each event type: 🎂 for birthdays, ⚽ for sports, 🍽️ for meals/lunch, 🏖️ for leave/holidays, 📌 for general events.
-- Separate each event with a blank line for readability.
+Formatting rules (output is rendered in Telegram with parse_mode HTML):
+- Use HTML tags ONLY. NEVER use **, *, or _ for formatting.
+- <b>text</b> for bold, <i>text</i> for italics.
+- Activity listing format:
+    📅 <b>Date</b> — <b>Activity name</b>
+    🕐 HH:MM → HH:MM
+    📝 Notes/location (if any)
+- Use a relevant emoji before each activity: ⚽ sports · 🍽️ meals · 🏋️ gym · 🏖️ leave · 💼 work · 📌 general
+- Separate each item with a blank line.
 - End responses with a friendly closing line.
 """.format(today=datetime.datetime.now().strftime("%A, %B %d, %Y %H:%M"))
 
@@ -84,9 +84,9 @@ Formatting rules (IMPORTANT):
 # ---------------------------------------------------------------------------
 
 class AgentState(TypedDict):
-    messages:  Annotated[Sequence[BaseMessage], add_messages]
-    oauth_ok:  bool
-    user_id:   int   # Telegram user ID — threaded through every turn
+    messages: Annotated[Sequence[BaseMessage], add_messages]
+    oauth_ok: bool
+    user_id:  int
 
 
 # ---------------------------------------------------------------------------
@@ -94,10 +94,6 @@ class AgentState(TypedDict):
 # ---------------------------------------------------------------------------
 
 def oauth_node(state: AgentState) -> AgentState:
-    """
-    Check whether valid Google credentials exist for this user.
-    Sets oauth_ok=True if authorised, False otherwise.
-    """
     return {
         "oauth_ok": is_authorised(state["user_id"]),
         "messages": [],
@@ -105,9 +101,7 @@ def oauth_node(state: AgentState) -> AgentState:
 
 
 def agent_node(state: AgentState) -> AgentState:
-    # Make the user's identity available to tools via context var
     current_user_id.set(state["user_id"])
-
     system_msg = SystemMessage(content=get_system_prompt())
     response   = model.invoke([system_msg] + list(state["messages"]))
     return {"messages": [response]}
@@ -167,15 +161,6 @@ async def run_agent(
     user_message: str,
     history: list,
 ) -> tuple[str, list, bool]:
-    """
-    Run one turn of the agent for a specific Telegram user.
-
-    Returns:
-        (reply_text, updated_history, oauth_ok)
-        reply_text – empty string when oauth_ok is False
-        oauth_ok   – False means the user has not connected Google Calendar yet
-    """
-    # Set context var immediately so any synchronous pre-graph code is covered too
     current_user_id.set(user_id)
 
     new_message  = HumanMessage(content=user_message)
