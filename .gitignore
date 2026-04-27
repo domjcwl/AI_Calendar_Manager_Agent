@@ -1,4 +1,11 @@
 .env
-__pycache__
+.env.*
+!.env.example
+__pycache__/
+*.pyc
 credentials.json
-token.pickle
+tokens/
+*.pickle
+*.log
+venv/
+.venv/
